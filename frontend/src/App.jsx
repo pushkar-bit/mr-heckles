@@ -5,10 +5,11 @@
  */
 
 import React           from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
 import { SignIn, SignUp } from '@clerk/clerk-react';
 import { AuthProvider, useAuth }  from './context/AuthContext.jsx';
-import Dashboard from './pages/Dashboard.jsx';
+import Dashboard    from './pages/Dashboard.jsx';
+import PropertySetup from './pages/PropertySetup.jsx';
 
 // ── Loading screen ─────────────────────────────────────────────
 const LoadingScreen = () => (
@@ -49,12 +50,28 @@ const Protected = ({ children }) => {
 const Public = ({ children }) => {
   const { isAuthenticated, isLoading } = useAuth();
   if (isLoading) return <LoadingScreen />;
-  return isAuthenticated ? <Navigate to="/dashboard" replace /> : children;
+  return isAuthenticated ? <Navigate to="/setup" replace /> : children;
+};
+
+// ── Setup page wrapper — passes navigation callback ───────────
+const SetupPage = () => {
+  const navigate = useNavigate();
+  const { isAuthenticated, isLoading } = useAuth();
+  if (isLoading) return <LoadingScreen />;
+  if (!isAuthenticated) return <Navigate to="/sign-in" replace />;
+
+  const handleComplete = (config) => {
+    // TODO: POST config to /api/properties to create the property
+    console.log('[setup] Property config:', config);
+    navigate('/dashboard', { replace: true, state: { newProperty: config } });
+  };
+
+  return <PropertySetup onComplete={handleComplete} />;
 };
 
 const AppRoutes = () => (
   <Routes>
-    <Route path="/" element={<Navigate to="/sign-in" replace />} />
+    <Route path="/" element={<Navigate to="/setup" replace />} />
 
     {/* Clerk's pre-built Sign In UI */}
     <Route path="/sign-in/*" element={
@@ -78,13 +95,16 @@ const AppRoutes = () => (
     <Route path="/login"    element={<Navigate to="/sign-in" replace />} />
     <Route path="/register" element={<Navigate to="/sign-up" replace />} />
 
+    {/* Property setup landing — shown after first sign-in */}
+    <Route path="/setup" element={<SetupPage />} />
+
     {/* Protected dashboard */}
     <Route path="/dashboard" element={
       <Protected><Dashboard /></Protected>
     } />
 
     {/* Catch-all */}
-    <Route path="*" element={<Navigate to="/sign-in" replace />} />
+    <Route path="*" element={<Navigate to="/setup" replace />} />
   </Routes>
 );
 
