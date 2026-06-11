@@ -21,9 +21,9 @@ import React, {
 import { motion, AnimatePresence } from 'framer-motion';
 import { useNavigate }              from 'react-router-dom';
 import { useAuth }                  from '../context/AuthContext.jsx';
-import ThreePropertyCanvas          from '../../ThreePropertyCanvas.jsx';
-import ContextOverlayPanel          from '../../ContextOverlayPanel.jsx';
-import usePropertySocket            from '../../hooks/usePropertySocket.js';
+import ThreePropertyCanvas          from '../components/Canvas3D.jsx';
+import ContextOverlayPanel          from '../components/SidePanelOverlay.jsx';
+import usePropertySocket            from '../hooks/usePropertySocket.js';
 
 // ─────────────────────────────────────────────────────────────
 //  Inline style tokens
@@ -129,7 +129,7 @@ const T = {
 //  Property Code Modal
 // ─────────────────────────────────────────────────────────────
 
-const CodeModal = ({ onSuccess, onSkip, token }) => {
+const CodeModal = ({ onSuccess, onSkip, getToken }) => {
   const [code,    setCode]    = useState('');
   const [loading, setLoading] = useState(false);
   const [error,   setError]   = useState('');
@@ -140,9 +140,10 @@ const CodeModal = ({ onSuccess, onSkip, token }) => {
     if (clean.length !== 4) { setError('Code must be exactly 4 characters.'); return; }
     setLoading(true); setError('');
     try {
+      const t    = await getToken();
       const res  = await fetch('/api/properties/sync-code', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` },
         body: JSON.stringify({ propertyCode: clean }),
       });
       const data = await res.json();
@@ -187,7 +188,7 @@ const CodeModal = ({ onSuccess, onSkip, token }) => {
 // ─────────────────────────────────────────────────────────────
 
 const Dashboard = () => {
-  const { user, token, role, logout } = useAuth();
+  const { user, getToken, role, logout } = useAuth();
   const navigate = useNavigate();
 
   const [property,       setProperty]       = useState(null);
@@ -200,7 +201,7 @@ const Dashboard = () => {
   // ── Socket connection (fires after property is resolved) ──
   const { isConnected, emitAttendance } = usePropertySocket({
     serverUrl:  window.location.origin,
-    token:      token ? `${user?.id}:${role}:${property?._id ?? ''}` : null,
+    token:      user ? `${user?.id}:${role}:${property?._id ?? ''}` : null,
     propertyId: property?._id ?? null,
     autoConnect: !!property,
     onTicketNew: (data) => {
@@ -214,33 +215,35 @@ const Dashboard = () => {
 
   // ── Auto IP-sync on mount ──────────────────────────────────
   useEffect(() => {
-    if (!token) return;
+    if (!user) return;
     setSyncStatus('syncing');
 
-    fetch('/api/properties/sync', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-    })
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.success) {
-          setProperty(data.property);
-          setSyncStatus('synced');
-        } else {
+    getToken().then((t) => {
+      fetch('/api/properties/sync', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${t}` },
+      })
+        .then((r) => r.json())
+        .then((data) => {
+          if (data.success) {
+            setProperty(data.property);
+            setSyncStatus('synced');
+          } else {
+            setSyncStatus('failed');
+            setShowCodeModal(true);
+          }
+        })
+        .catch(() => {
           setSyncStatus('failed');
           setShowCodeModal(true);
-        }
-      })
-      .catch(() => {
-        setSyncStatus('failed');
-        setShowCodeModal(true);
-      });
-  }, [token]);
+        });
+    });
+  }, [user, getToken]);
 
   // ── Handlers ──────────────────────────────────────────────
-  const handleLogout = useCallback(() => {
-    logout();
-    navigate('/login', { replace: true });
+  const handleLogout = useCallback(async () => {
+    await logout();
+    navigate('/sign-in', { replace: true });
   }, [logout, navigate]);
 
   const handlePropertySelect = useCallback((buildingId) => {
@@ -335,7 +338,7 @@ const Dashboard = () => {
         property={property}
         unit={null}
         tenantId={user?.id ?? null}
-        token={token}
+        getToken={getToken}
         emitAttendance={emitAttendance}
       />
 
@@ -343,7 +346,7 @@ const Dashboard = () => {
       <AnimatePresence>
         {showCodeModal && (
           <CodeModal
-            token={token}
+            getToken={getToken}
             onSuccess={handleCodeSuccess}
             onSkip={handleSkipCode}
           />

@@ -1,5 +1,18 @@
+/**
+ * @file User.js
+ * @description Mr. Heckles — User model.
+ *
+ * Authentication is delegated to Clerk. This model stores only the
+ * application-specific profile data that Clerk doesn't manage:
+ *   - clerkId  — the Clerk user ID (sub claim in Clerk's JWT), used as
+ *                the join key between Clerk identity and MongoDB profile.
+ *   - role     — 'landlord' | 'tenant' (set on first sign-in via /api/auth/sync)
+ *   - phone, details, emergencyContacts, etc.
+ *
+ * Password hashing (bcryptjs) is removed — Clerk owns credentials.
+ */
+
 import mongoose from 'mongoose';
-import bcrypt from 'bcryptjs';
 
 const { Schema, model } = mongoose;
 
@@ -69,6 +82,18 @@ const UserDetailsSchema = new Schema(
 // ─────────────────────────────────────────────
 const UserSchema = new Schema(
   {
+    // ── Clerk identity link ────────────────────────────────────
+    // Clerk's user ID (e.g. "user_2abc..."). Used to look up this
+    // document after Clerk verifies a request in auth.middleware.js.
+    clerkId: {
+      type: String,
+      required: [true, 'Clerk user ID is required.'],
+      unique: true,
+      trim: true,
+      index: true,
+    },
+
+    // ── Profile ───────────────────────────────────────────────
     fullName: {
       type: String,
       required: [true, 'Full name is required.'],
@@ -87,12 +112,8 @@ const UserSchema = new Schema(
         'Please enter a valid email address.',
       ],
     },
-    passwordHash: {
-      type: String,
-      required: [true, 'Password is required.'],
-      minlength: [60, 'Password hash appears malformed.'], // bcrypt hash length
-      select: false, // never returned in queries by default
-    },
+
+    // ── App role ──────────────────────────────────────────────
     role: {
       type: String,
       enum: {
@@ -101,6 +122,7 @@ const UserSchema = new Schema(
       },
       required: [true, 'User role is required.'],
     },
+
     phone: {
       type: String,
       trim: true,
@@ -115,14 +137,13 @@ const UserSchema = new Schema(
       type: UserDetailsSchema,
       default: () => ({}),
     },
-    // Soft-delete timestamp
     deactivatedAt: {
       type: Date,
       default: null,
     },
   },
   {
-    timestamps: true, // createdAt, updatedAt
+    timestamps: true,
     toJSON: { virtuals: true },
     toObject: { virtuals: true },
   }
@@ -131,27 +152,9 @@ const UserSchema = new Schema(
 // ─────────────────────────────────────────────
 //  Indexes
 // ─────────────────────────────────────────────
-UserSchema.index({ email: 1 }, { unique: true, name: 'idx_user_email' });
-UserSchema.index({ role: 1 }, { name: 'idx_user_role' });
-
-// ─────────────────────────────────────────────
-//  Pre-save Hook: Password Hashing
-// ─────────────────────────────────────────────
-UserSchema.pre('save', async function (next) {
-  // Only hash if the passwordHash field is new or modified raw plaintext
-  if (!this.isModified('passwordHash')) return next();
-
-  // Guard: skip re-hashing if it already looks like a bcrypt hash
-  if (this.passwordHash.startsWith('$2')) return next();
-
-  try {
-    const salt = await bcrypt.genSalt(12);
-    this.passwordHash = await bcrypt.hash(this.passwordHash, salt);
-    next();
-  } catch (err) {
-    next(err);
-  }
-});
+UserSchema.index({ clerkId: 1 }, { unique: true, name: 'idx_user_clerk_id' });
+UserSchema.index({ email: 1 },   { unique: true, name: 'idx_user_email' });
+UserSchema.index({ role: 1 },    { name: 'idx_user_role' });
 
 // ─────────────────────────────────────────────
 //  Pre-save Hook: Role-based Details Constraint
@@ -163,13 +166,6 @@ UserSchema.pre('save', function (next) {
   }
   next();
 });
-
-// ─────────────────────────────────────────────
-//  Instance Method: Verify Password
-// ─────────────────────────────────────────────
-UserSchema.methods.verifyPassword = async function (plaintext) {
-  return bcrypt.compare(plaintext, this.passwordHash);
-};
 
 // ─────────────────────────────────────────────
 //  Virtual: Display Name (alias)

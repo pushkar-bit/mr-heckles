@@ -30,6 +30,7 @@ import { initSocketManager }  from './config/socket.js';
 import propertySyncRoutes     from './routes/property.routes.js';
 import authRoutes             from './routes/auth.routes.js';
 import paymentRoutes          from './routes/payment.routes.js';
+import { clerkMiddleware }    from './middleware/auth.middleware.js';
 
 // ─────────────────────────────────────────────────────────────
 //  ESM __dirname shim (not available natively in ES modules)
@@ -44,7 +45,7 @@ const __dirname  = path.dirname(__filename);
 
 const REQUIRED_ENV = [
   'MONGODB_URI',
-  'JWT_SECRET',
+  'CLERK_SECRET_KEY',
   'CLIENT_ORIGIN',
   'RAZORPAY_KEY_ID',
   'RAZORPAY_KEY_SECRET',
@@ -97,6 +98,12 @@ app.use(helmet({
 
 // ── Compression ────────────────────────────────────────────────
 app.use(compression({ threshold: 1024 }));
+
+// ── Clerk session middleware ───────────────────────────────────
+// Must run BEFORE body parsers and route handlers.
+// Parses Clerk's JWT from Authorization header / __session cookie,
+// and populates req.auth on every request.
+app.use(clerkMiddleware());
 
 // ── Body parsers ───────────────────────────────────────────────
 // IMPORTANT: Razorpay webhook signature validation requires the raw,

@@ -1,20 +1,25 @@
 /**
  * @file auth.routes.js
- * @description Authentication route definitions.
+ * @description Mr. Heckles — Clerk-integrated auth routes.
  *
- *   POST /api/auth/register  — Public
- *   POST /api/auth/login     — Public
- *   GET  /api/auth/me        — Protected (valid JWT required)
+ * Clerk handles sign-up / sign-in on the frontend.
+ * These routes manage the MongoDB side of the user profile.
+ *
+ *   POST /api/auth/sync  — Upsert Clerk user into MongoDB (call after sign-in)
+ *   GET  /api/auth/me    — Return MongoDB profile for signed-in Clerk user
  */
 
-import { Router }   from 'express';
-import requireAuth  from '../middleware/requireAuth.js';
-import { register, login, getMe } from '../controllers/auth.controller.js';
+import { Router }  from 'express';
+import requireAuth from '../middleware/auth.middleware.js';
+import { syncUser, getMe } from '../controllers/auth.controller.js';
 
 const router = Router();
 
-router.post('/register', register);
-router.post('/login',    login);
-router.get('/me',        requireAuth, getMe);
+// Upsert MongoDB profile from Clerk identity
+// Body: { role: 'landlord' | 'tenant', phone?: string }
+router.post('/sync', requireAuth, syncUser);
+
+// Get current user's MongoDB profile
+router.get('/me', requireAuth, getMe);
 
 export default router;

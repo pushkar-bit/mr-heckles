@@ -1,62 +1,56 @@
 /**
  * @file auth.controller.js
- * @description Authentication controller: Register, Login, GetMe.
+ * @description Mr. Heckles — Clerk-integrated auth controller.
  *
- * Routes handled:
- *   POST /api/auth/register  — Create account, return JWT
- *   POST /api/auth/login     — Verify credentials, return JWT
- *   GET  /api/auth/me        — Return current user from token (protected)
+ * With Clerk handling authentication (sign-up, sign-in, sessions, MFA),
+ * this backend controller has a single responsibility:
+ *
+ *   POST /api/auth/sync  — Called by the frontend after Clerk sign-in.
+ *                          Upserts the Clerk user into MongoDB with their
+ *                          chosen application role (landlord | tenant).
+ *
+ *   GET  /api/auth/me    — Returns the MongoDB profile for the signed-in
+ *                          Clerk user. Creates a stub profile if none exists.
+ *
+ * Flow:
+ *   1. User signs in via Clerk (frontend handles entirely)
+ *   2. Frontend calls POST /api/auth/sync with { role } in body
+ *   3. Clerk JWT is verified by clerkMiddleware in server.js
+ *   4. This controller reads req.clerkUserId (set by requireAuth)
+ *   5. Upserts a User document in MongoDB linked by clerkId
+ *   6. Returns the MongoDB user profile
  */
 
-import jwt      from 'jsonwebtoken';
-import User     from '../models/User.js';
+import { clerkClient } from '@clerk/express';
+import User from '../models/User.js';
 
 // ─────────────────────────────────────────────────────────────
-//  Utility: Sign JWT
+//  Utility: sanitize user for API response
 // ─────────────────────────────────────────────────────────────
-
-const signToken = (userId, role) =>
-  jwt.sign(
-    { id: userId, role },
-    process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN ?? '7d' }
-  );
-
-/** Strips sensitive fields before sending user to client */
 const sanitizeUser = (user) => ({
   id:       user._id,
+  clerkId:  user.clerkId,
   fullName: user.fullName,
   email:    user.email,
   role:     user.role,
   phone:    user.phone,
   details:  user.details,
+  isActive: user.isActive,
+  createdAt: user.createdAt,
 });
 
 // ─────────────────────────────────────────────────────────────
-//  Register — POST /api/auth/register
+//  POST /api/auth/sync   (protected — requireAuth)
+//  Upserts the Clerk user into MongoDB.
+//  Called once after first sign-in (or to update role).
 // ─────────────────────────────────────────────────────────────
-
-export const register = async (req, res) => {
+export const syncUser = async (req, res) => {
   try {
-    const { fullName, email, password, role, phone } = req.body;
-
-    // ── Presence validation ────────────────────────────────
-    const missing = [];
-    if (!fullName) missing.push('fullName');
-    if (!email)    missing.push('email');
-    if (!password) missing.push('password');
-    if (!role)     missing.push('role');
-
-    if (missing.length > 0) {
-      return res.status(400).json({
-        success: false,
-        message: `Missing required field(s): ${missing.join(', ')}.`,
-        missing,
-      });
-    }
+    const clerkUserId = req.clerkUserId;  // set by requireAuth middleware
+    const { role, phone } = req.body;
 
     // ── Role validation ────────────────────────────────────
-    if (!['landlord', 'tenant'].includes(role)) {
+    if (role && !['landlord', 'tenant'].includes(role)) {
       return res.status(400).json({
         success: false,
         message: 'Role must be "landlord" or "tenant".',
@@ -64,83 +58,71 @@ export const register = async (req, res) => {
       });
     }
 
-    // ── Password strength guard ────────────────────────────
-    if (password.length < 8) {
+    // ── Fetch Clerk profile for name + email ───────────────
+    const clerkUser = await clerkClient.users.getUser(clerkUserId);
+
+    const fullName = [clerkUser.firstName, clerkUser.lastName].filter(Boolean).join(' ')
+      || clerkUser.username
+      || 'Mr. Heckles User';
+
+    const email = clerkUser.emailAddresses?.[0]?.emailAddress ?? null;
+
+    if (!email) {
       return res.status(400).json({
         success: false,
-        message: 'Password must be at least 8 characters.',
-        field: 'password',
+        message: 'Clerk account has no verified email address.',
       });
     }
 
-    // ── Duplicate email guard ──────────────────────────────
-    const existing = await User.findOne({ email: email.toLowerCase().trim() });
-    if (existing) {
-      return res.status(409).json({
-        success: false,
-        message: 'An account with this email address already exists.',
-        field: 'email',
-      });
-    }
+    // ── Upsert MongoDB user document ───────────────────────
+    // On first sync: create with role.
+    // On subsequent syncs: update name/email but do NOT overwrite existing role
+    // unless a new role is explicitly provided.
+    const update = {
+      fullName,
+      email,
+      ...(role   ? { role }  : {}),
+      ...(phone  ? { phone } : {}),
+    };
 
-    // ── Create user ────────────────────────────────────────
-    // The User pre-save hook will bcrypt-hash the passwordHash field.
-    const user = await User.create({
-      fullName: fullName.trim(),
-      email:    email.toLowerCase().trim(),
-      passwordHash: password,   // pre-save hook hashes this
-      role,
-      phone: phone ?? null,
-    });
+    const user = await User.findOneAndUpdate(
+      { clerkId: clerkUserId },
+      { $set: update, $setOnInsert: { clerkId: clerkUserId, role: role ?? 'tenant' } },
+      { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true }
+    );
 
-    // ── Issue JWT ──────────────────────────────────────────
-    const token = signToken(user._id, user.role);
-
-    return res.status(201).json({
+    return res.status(200).json({
       success: true,
-      message: 'Account created successfully.',
-      token,
+      message: 'User profile synced successfully.',
       user: sanitizeUser(user),
     });
   } catch (err) {
-    // Mongoose validation errors
     if (err.name === 'ValidationError') {
       const messages = Object.values(err.errors).map((e) => e.message);
-      return res.status(400).json({
-        success: false,
-        message: messages[0],
-        errors:  messages,
-      });
+      return res.status(400).json({ success: false, message: messages[0], errors: messages });
     }
-    console.error('[auth.controller] register error:', err);
-    return res.status(500).json({ success: false, message: 'Registration failed. Please try again.' });
+    console.error('[auth.controller] syncUser error:', err);
+    return res.status(500).json({ success: false, message: 'Failed to sync user profile.' });
   }
 };
 
 // ─────────────────────────────────────────────────────────────
-//  Login — POST /api/auth/login
+//  GET /api/auth/me   (protected — requireAuth)
+//  Returns the MongoDB profile for the authenticated Clerk user.
 // ─────────────────────────────────────────────────────────────
-
-export const login = async (req, res) => {
+export const getMe = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const clerkUserId = req.clerkUserId;
 
-    if (!email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email and password are required.',
-      });
-    }
-
-    // Fetch user WITH passwordHash (select: false by default)
-    const user = await User.findOne({ email: email.toLowerCase().trim() })
-      .select('+passwordHash');
-
-    // Generic message — do not reveal whether email exists
-    const INVALID_MSG = 'Invalid email or password.';
+    const user = await User.findOne({ clerkId: clerkUserId });
 
     if (!user) {
-      return res.status(401).json({ success: false, message: INVALID_MSG });
+      // Profile doesn't exist yet — frontend should call /api/auth/sync first
+      return res.status(404).json({
+        success: false,
+        message: 'User profile not found. Please complete onboarding.',
+        code: 'PROFILE_NOT_FOUND',
+      });
     }
 
     if (!user.isActive) {
@@ -150,43 +132,12 @@ export const login = async (req, res) => {
       });
     }
 
-    const isMatch = await user.verifyPassword(password);
-    if (!isMatch) {
-      return res.status(401).json({ success: false, message: INVALID_MSG });
-    }
-
-    const token = signToken(user._id, user.role);
-
-    return res.status(200).json({
-      success: true,
-      message: 'Login successful.',
-      token,
-      user: sanitizeUser(user),
-    });
-  } catch (err) {
-    console.error('[auth.controller] login error:', err);
-    return res.status(500).json({ success: false, message: 'Login failed. Please try again.' });
-  }
-};
-
-// ─────────────────────────────────────────────────────────────
-//  Get Me — GET /api/auth/me  (protected)
-// ─────────────────────────────────────────────────────────────
-
-export const getMe = async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id);
-
-    if (!user || !user.isActive) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
-    }
-
     return res.status(200).json({
       success: true,
       user: sanitizeUser(user),
     });
   } catch (err) {
     console.error('[auth.controller] getMe error:', err);
-    return res.status(500).json({ success: false, message: 'Failed to fetch user.' });
+    return res.status(500).json({ success: false, message: 'Failed to fetch user profile.' });
   }
 };
